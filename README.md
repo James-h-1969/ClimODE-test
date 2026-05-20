@@ -1,115 +1,108 @@
-# ClimODE: Climate and Weather Forecasting With Physics-informed Neural ODEs
+# ClimODE Training Guide
 
- [Yogesh verma](https://yoverma.github.io/yoerma.github.io/) | [Markus Heinonen](https://users.aalto.fi/~heinom10/) |  [Vikas Garg](https://www.mit.edu/~vgarg/)
- 
-The code repository for the paper ClimODE: Climate and Weather Forecasting With Physics-informed Neural ODEs. More information can be found on the project [website](https://yogeshverma1998.github.io/ClimODE/). 
-<p align="center">
-  <img src="https://github.com/Aalto-QuML/ClimODE/blob/main/workflow_final_climate_v6.png" />
-</p>
+Physics-informed Neural ODE for global weather forecasting (72hr lead time).
+Reads preprocessed ERA5 data in ClimaX `.npz` format.
 
-## Citation
-If you find this repository useful in your research, please consider citing the following paper:
- ```
-@inproceedings{
-verma2024climode,
-title={Clim{ODE}: Climate and Weather Forecasting with Physics-informed Neural {ODE}s},
-author={Yogesh Verma and Markus Heinonen and Vikas Garg},
-booktitle={The Twelfth International Conference on Learning Representations},
-year={2024},
-url={https://openreview.net/forum?id=xuY33XhEGR}
-}
+## Data Requirements
+
+The data directory (same output as ClimaX `nc2np_equally_era5.py`) should look like:
 
 ```
-
-## Prerequisites
-
-- torchdiffeq : https://github.com/rtqichen/torchdiffeq.
-- pytorch >= 1.12.0
-- torch-scatter 
-- torch-sparse 
-- torch-cluster 
-- torch-spline-conv 
-- torchcubicspline: https://github.com/patrick-kidger/torchcubicspline
-- properscoring (for CRPS scores) : https://pypi.org/project/properscoring/
-
-## Data Preparation
-
-First, download ERA5 data with 5.625deg from [WeatherBench](https://dataserv.ub.tum.de/index.php/s/m1524895). The data directory should look like the following
-```
-era5_data
-   |-- 10m_u_component_of_wind
-   |-- 10m_v_component_of_wind
-   |-- 2m_temperature
-   |-- constants
-   |-- geopotential_500
-   |-- temperature_850
+data_npz/
+├── train/          # 2006_0.npz ... 2015_7.npz (8 shards/year)
+├── val/            # 2016_0.npz ... 2016_7.npz
+├── test/           # 2017_0.npz ... 2018_7.npz
+├── lat.npy
+├── lon.npy
+├── normalize_mean.npz
+└── normalize_std.npz
 ```
 
-## Training ERA5
+Each `.npz` shard contains hourly data with keys like `geopotential_500`, `temperature_850`, `2m_temperature`, `10m_u_component_of_wind`, `10m_v_component_of_wind`, etc.
 
-### Global Forecast
+ClimODE uses 5 variables: Z500, T850, T2m, U10, V10 (subsampled to 6-hourly).
 
-To train ClimODE for global forecast use,
+## Setup on Cloud Machine
 
-```
-python train_global.py --scale 0 --batch_size 8 --spectral 0 --solver "euler" 
-```
+```bash
+# SSH in
+ssh james.hocking@<machine-ip>
 
-### Global Monthly Forecast
+# Activate environment (or create one with the deps below)
+conda activate climaX
 
-To train ClimODE for global monthly forecast use,
-
-```
-python train_monthly.py --scale 0 --batch_size 4 --spectral 0 --solver "euler" 
-```
-
-
-### Regional Forecast
-
-To train ClimODE for regional forecasts among various regions of earth use,
-```
-python train_region.py --scale 0 --batch_size 8 --spectral 0 --solver "euler" --region 'NorthAmerica/SouthAmerica/Australia'
+# Required packages (if not already installed):
+# pip install torch torchdiffeq torchcubicspline numpy xarray properscoring
 ```
 
-## Evaluation ERA5
+## Quick Pipeline Test (Dev Run)
 
-### Global Forecast
+Verifies data loading, kernel computation, velocity fitting, and 1 training step:
 
-To evaluate ClimODE for global forecast on Lat. weighted RMSE and ACC use, (Make sure to change the model path in the file)
-
-```
-python evaluation_global.py --spectral 0 --scale 0 --batch_size 8 
-```
-
-### Global Monthly Forecast
-
-To evaluate ClimODE for global monthly forecast on Lat. weighted RMSE and ACC use, (Make sure to change the model path in the file)
-
-```
-python evaluation_monthly.py --spectral 0 --scale 0 --batch_size 4 
+```bash
+cd ~/ClimODE-test
+python train.py --data_root ../data_npz --dev_run
 ```
 
-### Regional Forecast
+This loads only 1 year of data, fits velocity for 5 batches with 5 optim steps, and runs 1 epoch over 5 batches. Should complete in a few minutes.
 
-To evaluate ClimODE for regional forecast on Lat. weighted RMSE and ACC use, (Make sure to change the model path in the file)
+## Full Training
 
+```bash
+cd ~/ClimODE-test
+
+# In tmux/screen so it survives SSH disconnect:
+tmux new -s climode
+
+python train.py \
+  --data_root ../data_npz \
+  --solver euler \
+  --batch_size 13 \
+  --lr 0.0005 \
+  --epochs 300 \
+  --vel_steps 200 \
+  --save_dir Models
 ```
-python evaluation_region.py --spectral 0 --scale 0 --region 'NorthAmerica/SouthAmerica/Australia' --batch_size 8 
+
+Detach tmux: `Ctrl+B` then `D`. Reattach: `tmux attach -t climode`.
+
+### Key Arguments
+
+| Arg | Default | Description |
+|-----|---------|-------------|
+| `--data_root` | `.` | Path to npz data directory |
+| `--solver` | `euler` | ODE solver (euler, dopri5, rk4, midpoint) |
+| `--batch_size` | `13` | Timesteps per batch (13 = 72hr lead time) |
+| `--epochs` | `300` | Training epochs |
+| `--lr` | `0.0005` | Learning rate |
+| `--vel_steps` | `200` | Velocity optimization steps per timestep |
+| `--save_dir` | `Models` | Checkpoint save directory |
+| `--dev_run` | off | Quick pipeline test mode |
+
+### GPU Usage
+
+```bash
+# Check available GPUs
+nvidia-smi
+
+# Use a specific GPU
+CUDA_VISIBLE_DEVICES=3 python train.py --data_root ../data_npz ...
 ```
 
-## Training on a different custom dataset
+## Training Pipeline
 
-To train on a custom dataset, you need to follow the below guidelines
+1. **Data loading** — Reads npz shards, subsamples hourly→6-hourly, min-max normalizes
+2. **Kernel computation** — Gaussian RBF kernel for velocity smoothing (cached to `kernel.npy`)
+3. **Velocity fitting** — Solves inverse advection problem per timestep (cached to `vel_train.npy`, `vel_val.npy`)
+4. **Training** — Neural ODE with NLL loss + L2 regularization
+5. **Checkpointing** — Best model saved based on validation loss
 
-- **Data Loading**: You might want to change the data loading scheme depending on your data (e.g. seasonal, daily, etc., and with many different input channels), which can be found in ```utils.py``` in the data-loading function.
-- **Fitting initial velocity**: Depending on the data, you need to estimate the initial velocity to train and test the model (For more details, see the manuscript) via the ```fit_velocity``` function. 
-- **Model Function**: Depending on the input observable quantities, you might need to modify the number of input channels to model function in ```model_function.py```.
-- **Training and evaluation**: Depending on your dataset, you might want to fine-tune and change the various hyper-parameters in training and evaluation files. Make sure to make them consistent in both of them. Also, we report CRPS scores for global hourly forecast only, if you want to compute them for every task please include the ```evaluation_crps_mm``` function.
+Note: Steps 2-3 are expensive on first run but cached for subsequent runs.
 
+## Evaluation
 
+```bash
+python evaluate.py --model_path Models/ClimODE_global_euler_epoch42.pt --data_root ../data_npz
+```
 
-Note: We are also constantly updating and revising the repo to make it more adaptable in a general way, and finidng bugs and removing them and modifying certain parts.
-
-
-
-
+Outputs latitude-weighted RMSE, ACC, and CRPS at 6h–72h lead times.

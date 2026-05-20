@@ -1,0 +1,148 @@
+# ClimODE: Climate and Weather Forecasting with Physics-informed Neural ODEs
+
+## Paper
+- **Title**: ClimODE: Climate and Weather Forecasting with Physics-informed Neural ODEs
+- **Authors**: Yogesh Verma, Markus Heinonen, Vikas Garg (Aalto University / YaiYai Ltd)
+- **Venue**: ICLR 2024
+- **Link**: https://openreview.net/forum?id=xuY33XhEGR
+
+## Core Idea
+
+ClimODE models weather as a **continuous-time advection process** — the physical principle that weather changes because quantities (temperature, wind, pressure) are spatially transported by flow. Instead of treating forecasting as a black-box sequence prediction problem, it encodes the **continuity equation** from fluid mechanics directly into the model architecture:
+
+```
+du/dt = -(v · ∇u) - u(∇ · v)
+         transport   compression
+```
+
+This means: the rate of change of a quantity u at a point equals the flow velocity v transporting existing gradients, plus the compression/expansion of the flow concentrating or dispersing the quantity. This is **value-conserving** — quantities are moved around but never created or destroyed by the advection, preventing long-horizon forecast collapse.
+
+## Architecture Overview
+
+The model is a **2nd-order Neural ODE system** with two coupled equations:
+1. **State evolution** (u̇): governed by the advection equation above (physics-based, not learned)
+2. **Velocity acceleration** (v̇): learned by a neural network f_θ
+
+The system is solved jointly as:
+```
+[u(t)]   [u(t₀)]     t  [ -∇·(u·v)           ]
+[    ] = [      ] + ∫   [                      ] dτ
+[v(t)]   [v(t₀)]    t₀  [ f_θ(u, ∇u, v, ψ)   ]
+```
+
+This is integrated using `torchdiffeq.odeint` with configurable solvers (euler, dopri5, rk4, etc.).
+
+## Key Components
+
+### 1. Velocity Network (f_θ) — `model_function.py`
+Predicts velocity *acceleration* (not velocity itself). Combines:
+- **Local convolutions** (`Climate_ResNet_2D`): ResNet with 3×3 convolutions, captures nearby weather interactions. Architecture: [5,3,2] layers with [128,64,2K] hidden channels.
+- **Global attention** (`Self_attn_conv`): CNN-based Key/Query/Value attention that captures long-range teleconnections (e.g., Atlantic weather affecting Europe). Weighted by learnable γ parameter.
+
+The combined output: `dv = f_conv(input) + γ * f_att(input)`
+
+### 2. Initial Velocity Inference — `utils.py: fit_velocity(), optimize_vel()`
+Since the ODE needs an initial velocity v(t₀) to start integration, ClimODE solves an **inverse problem**: given past observations, find the velocity field that best explains the observed state changes via the continuity equation.
+
+Process:
+- Compute temporal derivative ũ̇ from past 3 timesteps using cubic spline interpolation (`torchcubicspline`)
+- Optimize v_x, v_y to minimize: ||ũ̇ + v·∇u + u(∇·v)||² + α·||v||_K
+- The regularizer uses a **Gaussian RBF kernel** K(x_i, x_j) = exp(-||x_i - x_j||²/2σ²) to enforce spatial smoothness
+- Solved per-timestep via Adam optimizer (200 steps, lr=2)
+
+### 3. Emission/Noise Network — `model_function.py: noise_net_contrib()`
+Handles two limitations of the closed advection system:
+- **Sources/sinks**: day-night temperature cycles, radiation, etc. that add/remove energy
+- **Uncertainty quantification**: provides prediction confidence
+
+Outputs a Gaussian: u_obs ~ N(u_advection + μ_bias, σ²)
+- μ captures systematic bias (e.g., diurnal heating)
+- σ² captures prediction uncertainty
+- σ is passed through Softplus for positivity
+
+### 4. Spatiotemporal Embeddings — `model_function.py: pde()`
+Encodes position and time as additional input channels:
+- **Time**: sin/cos embeddings for daily cycle (period=24h) and seasonal cycle (period=365 days)
+- **Position**: lat/lon in radians, cos(lat), sin(lat), cos(lon), sin(lon), sin(lat)·cos(lon), sin(lat)·sin(lon)
+- **Joint time×position**: outer product of time and position features
+- **Static features**: land-sea mask (lsm), orography (oro)
+
+### 5. Boundary Handling — `model_utils.py: boundarypad, ResidualBlock`
+Uses physics-appropriate padding:
+- **Circular padding** in longitude (east-west wraps around)
+- **Reflective padding** in latitude (poles reflect)
+
+## File Structure
+
+| File | Purpose |
+|------|---------|
+| `model_function.py` | All model classes: `Climate_encoder_free_uncertain` (global), `ClimODE_encoder_free_uncertain` (global variant), `ClimODE_uncertain_region` (regional), `Climate_encoder_free_uncertain_monthly` (monthly climate), `Optim_velocity` (velocity fitting) |
+| `model_utils.py` | Building blocks: `ResidualBlock`, `Self_attn_conv`, `Self_attn_conv_reg`, `boundarypad` |
+| `utils.py` | Data loading (ERA5 via xarray), evaluation metrics (RMSE, ACC, CRPS), velocity fitting pipeline, Gaussian kernel computation |
+| `train_global.py` | Training pipeline for global 6-hourly forecasting |
+| `train_monthly.py` | Training pipeline for monthly climate forecasting |
+| `train_region.py` | Training pipeline for regional forecasting |
+| `evaluation_global.py` | Evaluation: latitude-weighted RMSE, ACC, CRPS |
+| `evaluation_monthly.py` | Monthly forecast evaluation |
+| `evaluation_region.py` | Regional forecast evaluation |
+| `checkpoints/` | Pre-trained model checkpoint (`ClimODE_global.pt`) |
+
+## Data
+
+- **Source**: ERA5 reanalysis from WeatherBench at 5.625° resolution (32×64 grid)
+- **Variables**: Geopotential (Z500), Temperature (T850), 2m Temperature, 10m U-wind, 10m V-wind
+- **Split**: Train 2006-2015, Validation 2016, Test 2017-2018
+- **Normalization**: Min-max scaling per variable over 2006-2018
+- **Temporal resolution**: 6-hourly (resampled from ERA5)
+
+## Training Pipeline
+
+1. **Load and normalize** ERA5 data for all 5 variables
+2. **Compute Gaussian RBF kernel** for velocity smoothing
+3. **Fit initial velocities** for train/val/test sets (inverse problem, ~200 optimization steps per timestep)
+4. **Train the Neural ODE** with:
+   - Loss: Negative log-likelihood with variance prior
+   - Variance prior coefficient: starts at 0.001, then decays via `2 * cosine_annealing_lr`
+   - Optimizer: AdamW (lr=0.0005, weight_decay=1e-5)
+   - L2 regularization: λ=0.001
+   - Scheduler: CosineAnnealingLR over 300 epochs
+   - Batch size: 8 timesteps per batch
+
+## Evaluation Metrics
+
+- **Latitude-weighted RMSE**: Accounts for grid cell area variation with latitude
+- **ACC** (Anomaly Correlation Coefficient): Correlation of predicted vs true anomalies from climatology
+- **CRPS** (Continuous Ranked Probability Score): Evaluates probabilistic forecasts
+
+## Key Design Decisions
+
+1. **Why Neural ODE over autoregressive?** Continuous-time integration respects conservation laws; discrete jumps violate mass conservation and accumulate errors.
+2. **Why 2nd-order?** Learning velocity acceleration (v̇) rather than velocity directly gives smoother, more physical trajectories.
+3. **Why advection as inductive bias?** Forces the model onto a value-preserving manifold — quantities are redistributed, not created/destroyed — preventing long-horizon collapse.
+4. **Why hybrid local+global?** Local convolutions capture nearby weather dynamics efficiently; global attention captures teleconnections (e.g., ENSO, jet stream effects).
+5. **Only 2.8M parameters** vs GraphCast (37M), ClimaX (107M), Pangu-Weather (256M) — physics inductive bias reduces the need for massive parameterization.
+
+## Running
+
+```bash
+# Train global forecast
+python train_global.py --scale 0 --batch_size 8 --spectral 0 --solver "euler"
+
+# Evaluate global forecast
+python evaluation_global.py --spectral 0 --scale 0 --batch_size 8
+
+# Train regional forecast
+python train_region.py --scale 0 --batch_size 8 --spectral 0 --solver "euler" --region 'NorthAmerica'
+
+# Train monthly climate forecast
+python train_monthly.py --scale 0 --batch_size 4 --spectral 0 --solver "euler"
+```
+
+## Dependencies
+
+- PyTorch ≥ 1.12
+- torchdiffeq (Neural ODE solver)
+- torchcubicspline (temporal derivative estimation)
+- xarray (ERA5 data handling)
+- properscoring (CRPS evaluation)
+- torch-scatter, torch-sparse, torch-cluster, torch-spline-conv
