@@ -103,6 +103,12 @@ def train_epoch(
             yr_end = min(yr_start + YEARS_PER_GROUP, num_years)
             n_yrs = yr_end - yr_start
 
+            # Only update BN stats on first group; freeze for rest
+            if g == 0:
+                model.train()
+            else:
+                model.eval()
+
             # Slice year dimension
             initial = batch[0, yr_start:yr_end].to(device).view(n_yrs, 1, num_vars, GRID_H, GRID_W)
             past_vel = vel_train[entry, yr_start:yr_end].view(n_yrs, 2 * num_vars, GRID_H, GRID_W).to(device)
@@ -116,6 +122,8 @@ def train_epoch(
             loss = nll_loss(mean, std, target, var_coeff) / num_groups
             loss.backward()
             batch_loss += loss.item()
+
+        model.train()
 
         # L2 regularization (added once, not per group)
         l2_norm = sum(p.pow(2.0).sum() for p in model.parameters())
