@@ -45,7 +45,7 @@ logger = logging.getLogger(__name__)
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Evaluate ClimODE at 72hr lead time")
     parser.add_argument("--model_path", type=str, required=True, help="Path to trained model .pt")
-    parser.add_argument("--batch_size", type=int, default=13, help="13 for 72hr lead time")
+    parser.add_argument("--batch_size", type=int, default=8, help="8 for 42hr lead time (paper default)")
     parser.add_argument("--data_root", type=str, default=".")
     parser.add_argument("--vel_path", type=str, default=None, help="Path to test velocity .npy")
     parser.add_argument("--vel_steps", type=int, default=200)

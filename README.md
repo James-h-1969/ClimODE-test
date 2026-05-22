@@ -48,16 +48,22 @@ This loads only 1 year of data, fits velocity for 5 batches with 5 optim steps, 
 
 ## Full Training
 
+Uses gradient accumulation to train on all 10 years (2006-2015) while fitting in 15GB GPU memory.
+Processes 2 years at a time, accumulates gradients over 5 groups.
+
 ```bash
 cd ~/ClimODE-test
+
+# Delete old cached velocities (required when changing batch_size or years)
+rm -f ../data_npz/vel_train.npy ../data_npz/vel_val.npy
 
 # In tmux/screen so it survives SSH disconnect:
 tmux new -s climode
 
-python train.py \
+CUDA_VISIBLE_DEVICES=0 python train.py \
   --data_root ../data_npz \
   --solver euler \
-  --batch_size 13 \
+  --batch_size 8 \
   --lr 0.0005 \
   --epochs 300 \
   --vel_steps 200 \
@@ -72,7 +78,7 @@ Detach tmux: `Ctrl+B` then `D`. Reattach: `tmux attach -t climode`.
 |-----|---------|-------------|
 | `--data_root` | `.` | Path to npz data directory |
 | `--solver` | `euler` | ODE solver (euler, dopri5, rk4, midpoint) |
-| `--batch_size` | `13` | Timesteps per batch (13 = 72hr lead time) |
+| `--batch_size` | `8` | Timesteps per batch (8 = 42hr lead time, paper default) |
 | `--epochs` | `300` | Training epochs |
 | `--lr` | `0.0005` | Learning rate |
 | `--vel_steps` | `200` | Velocity optimization steps per timestep |

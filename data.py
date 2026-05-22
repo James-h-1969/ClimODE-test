@@ -45,6 +45,7 @@ TEST_YEARS = [2017, 2018]
 
 NUM_SHARDS = 8
 SUBSAMPLE_FACTOR = 6  # hourly -> 6-hourly
+YEARS_PER_GROUP = 2  # gradient accumulation: process this many years at a time
 
 # Grid dimensions (set at runtime by create_dataloaders)
 GRID_H, GRID_W = 32, 64

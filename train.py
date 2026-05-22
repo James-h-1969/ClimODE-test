@@ -1,9 +1,10 @@
 """Training script for ClimODE global weather forecasting.
 
-Trains the model to predict 72hr (12 steps × 6h) ahead on ERA5 5.625° data.
+Trains the model to predict 42hr (7 steps × 6h) ahead on ERA5 5.625° data.
+Uses gradient accumulation over year groups to fit 10 years on a 15GB GPU.
 
 Usage:
-    python train.py --solver euler --batch_size 13 --lr 0.0005 --epochs 300
+    python train.py --solver euler --batch_size 8 --lr 0.0005 --epochs 300
 """
 
 import argparse
@@ -20,6 +21,7 @@ from data import (
     GRID_H,
     GRID_W,
     VARIABLES,
+    YEARS_PER_GROUP,
     compute_gaussian_kernel,
     create_dataloaders,
     fit_velocity_field,
@@ -39,10 +41,10 @@ SOLVERS = ["euler", "dopri5", "dopri8", "rk4", "midpoint", "adaptive_heun"]
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Train ClimODE for global 72hr forecasting")
+    parser = argparse.ArgumentParser(description="Train ClimODE for global forecasting")
     parser.add_argument("--solver", type=str, default="euler", choices=SOLVERS)
     parser.add_argument("--epochs", type=int, default=300)
-    parser.add_argument("--batch_size", type=int, default=13, help="13 for 72hr lead time")
+    parser.add_argument("--batch_size", type=int, default=8, help="8 for 42hr lead time (paper default)")
     parser.add_argument("--lr", type=float, default=0.0005)
     parser.add_argument("--weight_decay", type=float, default=1e-5)
     parser.add_argument("--l2_lambda", type=float, default=0.001)
@@ -59,17 +61,7 @@ def parse_args() -> argparse.Namespace:
 def nll_loss(
     mean: torch.Tensor, std: torch.Tensor, truth: torch.Tensor, var_coeff: float
 ) -> torch.Tensor:
-    """Negative log-likelihood loss with variance regularization.
-
-    Args:
-        mean: Predicted mean (T, B, K, H, W).
-        std: Predicted std (T, B, K, H, W).
-        truth: Ground truth (T, B, K, H, W).
-        var_coeff: Coefficient for variance penalty (decayed during training).
-
-    Returns:
-        Scalar loss value.
-    """
+    """Negative log-likelihood loss with variance regularization."""
     dist = torch.distributions.Normal(mean, std + 1e-3)
     nll = -dist.log_prob(truth).mean()
     var_penalty = var_coeff * (std**2).sum()
@@ -91,45 +83,55 @@ def train_epoch(
     num_vars: int,
     max_batches: int = -1,
 ) -> float:
-    """Run one training epoch.
-
-    Returns:
-        Total training loss for the epoch.
-    """
+    """Run one training epoch with gradient accumulation over year groups."""
     model.train()
     total_loss = 0.0
+    num_groups = (num_years + YEARS_PER_GROUP - 1) // YEARS_PER_GROUP
 
     for entry, (time_steps, batch) in enumerate(
         zip(loaders["time_loader"], loaders["train_loader"])
     ):
         if max_batches > 0 and entry >= max_batches:
             break
+
         optimizer.zero_grad()
+        batch_loss = 0.0
 
-        # Prepare inputs
-        initial = batch[0].to(device).view(num_years, 1, num_vars, GRID_H, GRID_W)
-        past_vel = vel_train[entry].view(num_years, 2 * num_vars, GRID_H, GRID_W).to(device)
+        # Gradient accumulation over year groups
+        for g in range(num_groups):
+            yr_start = g * YEARS_PER_GROUP
+            yr_end = min(yr_start + YEARS_PER_GROUP, num_years)
+            n_yrs = yr_end - yr_start
 
-        model.update_state(past_vel, const_info.to(device), lat_map.to(device), lon_map.to(device))
+            # Slice year dimension
+            initial = batch[0, yr_start:yr_end].to(device).view(n_yrs, 1, num_vars, GRID_H, GRID_W)
+            past_vel = vel_train[entry, yr_start:yr_end].view(n_yrs, 2 * num_vars, GRID_H, GRID_W).to(device)
+            target = batch[:, yr_start:yr_end].float().to(device)
 
-        t = time_steps.float().to(device).flatten()
-        mean, std, _ = model(t, initial.squeeze(1))
+            model.update_state(past_vel, const_info.to(device), lat_map.to(device), lon_map.to(device))
 
-        # Loss
-        loss = nll_loss(mean, std, batch.float().to(device), var_coeff)
+            t = time_steps.float().to(device).flatten()
+            mean, std, _ = model(t, initial.squeeze(1))
+
+            loss = nll_loss(mean, std, target, var_coeff) / num_groups
+            loss.backward()
+            batch_loss += loss.item()
+
+        # L2 regularization (added once, not per group)
         l2_norm = sum(p.pow(2.0).sum() for p in model.parameters())
-        loss = loss + l2_lambda * l2_norm
+        l2_loss = l2_lambda * l2_norm
+        l2_loss.backward()
+        batch_loss += l2_loss.item()
 
-        if torch.isnan(loss):
+        if torch.isnan(torch.tensor(batch_loss)):
             logger.error(f"NaN loss at batch {entry}. Stopping.")
             sys.exit(1)
 
-        loss.backward()
         optimizer.step()
-        total_loss += loss.item()
+        total_loss += batch_loss
 
         if entry % 20 == 0:
-            logger.debug(f"  Batch {entry}: loss={loss.item():.4f}")
+            logger.debug(f"  Batch {entry}: loss={batch_loss:.4f}")
 
     return total_loss
 
@@ -147,7 +149,7 @@ def validate(
     num_vars: int,
     max_batches: int = -1,
 ) -> float:
-    """Run validation and return total loss."""
+    """Run validation (no gradient accumulation needed — val has 1 year)."""
     model.eval()
     total_loss = 0.0
 
@@ -157,6 +159,7 @@ def validate(
         ):
             if max_batches > 0 and entry >= max_batches:
                 break
+
             initial = batch[0].to(device).view(num_years, 1, num_vars, GRID_H, GRID_W)
             past_vel = vel_val[entry].view(num_years, 2 * num_vars, GRID_H, GRID_W).to(device)
 
@@ -194,6 +197,8 @@ def main():
     num_years_train = data["train_data"].shape[1]
     num_years_val = data["val_data"].shape[1]
     num_vars = len(VARIABLES)
+
+    logger.info(f"Training: {num_years_train} years, gradient accumulation over groups of {YEARS_PER_GROUP}")
 
     # Compute kernel and fit velocities
     kernel_path = os.path.join(args.data_root, "kernel.npy")
@@ -239,19 +244,18 @@ def main():
     for epoch in range(epochs):
         epoch_start = time.time()
 
-        # Variance coefficient: starts small, decays with LR
         var_coeff = 0.001 if epoch == 0 else 2 * scheduler.get_last_lr()[0]
 
         train_loss = train_epoch(
             model, loaders, vel_train, data["const_info"], data["lat_map"], data["lon_map"],
             optimizer, var_coeff, args.l2_lambda, device, num_years_train, num_vars,
-            max_batches=max_vel_batches,
+            max_batches=max_vel_batches if args.dev_run else -1,
         )
 
         val_loss = validate(
             model, loaders, vel_val, data["const_info"], data["lat_map"], data["lon_map"],
             var_coeff, device, num_years_val, num_vars,
-            max_batches=max_vel_batches,
+            max_batches=max_vel_batches if args.dev_run else -1,
         )
 
         scheduler.step()
