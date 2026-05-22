@@ -211,16 +211,16 @@ def main():
     vel_train = fit_velocity_field(
         loaders["time_idx"], loaders["time_loader"], data["train_data"],
         loaders["train_loader"], num_years_train, num_vars, kernel,
-        os.path.join(args.data_root, "vel_train.npy"),
-        optim_steps=vel_steps, max_batches=max_vel_batches,
+        os.path.join(args.data_root, f"vel_train_y{num_years_train}_b{args.batch_size}.npy"),
+        optim_steps=vel_steps, max_batches=max_vel_batches if args.dev_run else -1,
     )
 
     logger.info("Fitting validation velocities...")
     vel_val = fit_velocity_field(
         loaders["time_idx"], loaders["time_loader"], data["val_data"],
         loaders["val_loader"], num_years_val, num_vars, kernel,
-        os.path.join(args.data_root, "vel_val.npy"),
-        optim_steps=vel_steps, max_batches=max_vel_batches,
+        os.path.join(args.data_root, f"vel_val_y{num_years_val}_b{args.batch_size}.npy"),
+        optim_steps=vel_steps, max_batches=max_vel_batches if args.dev_run else -1,
     )
 
     # Create model

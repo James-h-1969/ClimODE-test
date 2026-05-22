@@ -77,7 +77,7 @@ def main():
     logger.info(f"Climatology shape: {climatology.shape}")
 
     # Fit or load test velocities
-    vel_path = args.vel_path or os.path.join(args.data_root, "vel_test.npy")
+    vel_path = args.vel_path or os.path.join(args.data_root, f"vel_test_y{num_years_test}_b{args.batch_size}.npy")
     kernel_path = os.path.join(args.data_root, "kernel.npy")
     kernel = compute_gaussian_kernel(lat, lon, kernel_path)
 

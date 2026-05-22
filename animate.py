@@ -35,9 +35,9 @@ def main():
     parser.add_argument("--model_path", type=str, required=True)
     parser.add_argument("--data_root", type=str, default="../data_npz")
     parser.add_argument("--batch_size", type=int, default=8)
-    parser.add_argument("--num_batches", type=int, default=20, help="Number of consecutive batches to animate")
-    parser.add_argument("--output", type=str, default="climode_t2m_animation.mp4")
-    parser.add_argument("--fps", type=int, default=4)
+    parser.add_argument("--num_batches", type=int, default=3, help="Number of consecutive batches to animate")
+    parser.add_argument("--output", type=str, default="climode_t2m_animation.gif")
+    parser.add_argument("--fps", type=int, default=1)
     args = parser.parse_args()
 
     set_seed(42)
@@ -110,11 +110,12 @@ def main():
 
     # Create animation
     print("Creating animation...")
-    fig, axes = plt.subplots(1, 2, figsize=(14, 4),
+    fig, axes = plt.subplots(1, 3, figsize=(20, 4),
                              subplot_kw={"projection": ccrs.PlateCarree()})
 
     vmin = min(f.min() for f in truth_frames)
     vmax = max(f.max() for f in truth_frames)
+    err_max = max(np.abs(p - t).max() for p, t in zip(pred_frames, truth_frames))
 
     lon2d, lat2d = np.meshgrid(lon, lat)
 
@@ -135,12 +136,18 @@ def main():
                                   transform=ccrs.PlateCarree())
         axes[1].set_title(f"ERA5 Ground Truth | t+{i*6}h")
 
-        return [im0, im1]
+        error = pred_frames[i] - truth_frames[i]
+        im2 = axes[2].pcolormesh(lon2d, lat2d, error,
+                                  cmap="bwr", vmin=-err_max, vmax=err_max,
+                                  transform=ccrs.PlateCarree())
+        axes[2].set_title(f"Error (Pred - Truth) | t+{i*6}h")
+
+        return [im0, im1, im2]
 
     ani = animation.FuncAnimation(fig, animate_frame, frames=len(pred_frames),
                                   interval=1000 // args.fps, blit=False)
 
-    ani.save(args.output, writer="ffmpeg", fps=args.fps, dpi=120)
+    ani.save(args.output, writer="pillow", fps=args.fps, dpi=100)
     print(f"Animation saved to {args.output}")
     plt.close()
 
