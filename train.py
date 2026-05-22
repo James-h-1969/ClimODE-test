@@ -240,6 +240,7 @@ def main():
     os.makedirs(args.save_dir, exist_ok=True)
     best_val_loss = float("inf")
     best_epoch = -1
+    run_id = time.strftime("%Y%m%d_%H%M%S")
 
     for epoch in range(epochs):
         epoch_start = time.time()
@@ -271,7 +272,7 @@ def main():
             best_val_loss = val_loss
             best_epoch = epoch
             save_path = os.path.join(
-                args.save_dir, f"ClimODE_global_{args.solver}_epoch{epoch}.pt"
+                args.save_dir, f"ClimODE_{args.solver}_{run_id}_epoch{epoch}.pt"
             )
             torch.save(model, save_path)
             logger.info(f"  New best model saved: {save_path}")
